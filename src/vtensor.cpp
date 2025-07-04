@@ -1,8 +1,43 @@
+/* Copyright 2025 vTensor authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
+
 #include <cuda.h>
+
 #include <mutex>
 #include <numeric>
 
+#include <torch/torch.h>
+
 #include "vtensor.h"
+
+#include "cu_util.h"
+#include "logging.h"
+
+// MACRO better to be in cpp files
+#define ROUND_UP(x, n) (((x) + ((n) - 1)) / (n) * (n))
+
+#define DRV_CALL(call)                                                         \
+  {                                                                            \
+    CUresult result = (call);                                                  \
+    if (CUDA_SUCCESS != result) {                                              \
+      const char *errMsg;                                                      \
+      cuGetErrorString(result, &errMsg);                                       \
+      ASSERT(0, "Error when exec " #call " %s-%d code:%d err:%s",              \
+             __FUNCTION__, __LINE__, result, errMsg);                          \
+    }                                                                          \
+  }
 
 void init_shared_phy_blocks(int num_blocks, size_t block_size) {
   int device_id = -1;
