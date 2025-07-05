@@ -15,6 +15,8 @@ limitations under the License.
 
 #include <cuda.h>
 
+#include <iostream>
+
 #include <mutex>
 #include <numeric>
 
@@ -25,19 +27,6 @@ limitations under the License.
 #include "cu_util.h"
 #include "logging.h"
 
-// MACRO better to be in cpp files
-#define ROUND_UP(x, n) (((x) + ((n) - 1)) / (n) * (n))
-
-#define DRV_CALL(call)                                                         \
-  {                                                                            \
-    CUresult result = (call);                                                  \
-    if (CUDA_SUCCESS != result) {                                              \
-      const char *errMsg;                                                      \
-      cuGetErrorString(result, &errMsg);                                       \
-      ASSERT(0, "Error when exec " #call " %s-%d code:%d err:%s",              \
-             __FUNCTION__, __LINE__, result, errMsg);                          \
-    }                                                                          \
-  }
 
 void init_shared_phy_blocks(int num_blocks, size_t block_size) {
   int device_id = -1;
@@ -84,23 +73,7 @@ void release_shared_phy_blocks() {
   }
 }
 
-PhyBlock::PhyBlock(int device_id, size_t block_size) {
-  this->device_id = device_id;
-  this->block_size = block_size;
-  CUmemAllocationProp prop = {};
-  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.location.id = device_id;
-
-  status = cuMemCreate(&alloc_handle, block_size, &prop, 0ULL);
-}
-
-PhyBlock::~PhyBlock() {
-  if (status == CUDA_SUCCESS) {
-    status = cuMemRelease(alloc_handle);
-    DRV_CALL(status);
-  }
-}
+std::shared_ptr<Allocator> VmmTensor::allocator = nullptr;
 
 VmmTensor::VmmTensor(std::vector<int64_t> shape, torch::Dtype dtype,
                      int offset_index, int world_size, int pre_flag)
@@ -113,19 +86,25 @@ VmmTensor::VmmTensor(std::vector<int64_t> shape, torch::Dtype dtype,
   actual_size = std::accumulate(shape.begin(), shape.end(), dtype_size,
                                 std::multiplies<int64_t>());
 
-  CUmemAllocationProp prop = {};
-  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  prop.location.id = device_id;
-  size_t granularity;
-  DRV_CALL(cuMemGetAllocationGranularity(&granularity, &prop,
-                                         CU_MEM_ALLOC_GRANULARITY_MINIMUM));
-  padded_size = ROUND_UP(actual_size, granularity);
-  DRV_CALL(cuMemAddressReserve(&v_ptr, padded_size, 0ULL, 0ULL, 0ULL));
+  if (this->allocator == nullptr) {
+    this->allocator = nvgpu::VmmAllocator::instance();
+  }
+
+  this->allocator->reserve_virtual_addr((void **)&v_ptr, actual_size/*requested_size*/, &padded_size/*reserved_size*/, device_id, 0/*stream*/);
+
+  std::cout << "[VmmTensor::VmmTensor] Reserving virtual address " << reinterpret_cast<uint64_t>((void *)v_ptr) << " with requested size " << actual_size << ", reserved_size " << padded_size << std::endl;
 
   AllocMemory(offset_index, world_size, pre_flag);
 
   tensor = GetTensor(shape, dtype);
+}
+
+VmmTensor::VmmTensor(std::vector<int64_t> shape, torch::Dtype dtype,
+                     int offset_index, int world_size, Allocator* _allocator) : VmmTensor(shape, dtype, offset_index, world_size, 0/*pre_flag*/) {
+   if (this->allocator == nullptr) {
+      this->allocator = std::make_shared<nvgpu::VmmAllocator>();
+   }
+   this->allocator.reset(_allocator);
 }
 
 void VmmTensor::AllocMemory(int offset_index, int world_size, int pre_flag) {
@@ -137,19 +116,23 @@ void VmmTensor::AllocMemory(int offset_index, int world_size, int pre_flag) {
   for (int i = 0; i < world_size; i++) {
     char *offset_addr = (char *)v_ptr + i * offset_size;
     if (i == offset_index) {
-      assert(unique_phy_blocks.size() >= 0);
-      this->u_p_block =
-          std::move(unique_phy_blocks[unique_phy_blocks.size() - 1]);
-      unique_phy_blocks.pop_back();
-      DRV_CALL(cuMemMap(reinterpret_cast<CUdeviceptr>(offset_addr), offset_size,
-                        0ULL, this->u_p_block->alloc_handle, 0ULL));
-      CUmemAccessDesc accessDesc = {};
-      accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-      accessDesc.location.id = this->device_id;
-      accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-      DRV_CALL(cuMemSetAccess(reinterpret_cast<CUdeviceptr>(offset_addr),
-                              offset_size, &accessDesc, 1));
+      if(unique_phy_blocks.size() >= 0) {
+        this->u_p_block =
+            std::move(unique_phy_blocks[unique_phy_blocks.size() - 1]);
+        unique_phy_blocks.pop_back();
+        this->allocator->exclusive_pool.add(this->u_p_block.get());
+      } else {
+        // use does not call init_shared_phy_blocks api, no pre allocated
+        std::cout << "[AllocMemory] Not implmented yet" << std::endl;
+        exit(0);
+      }
+
+      // use the address to find the block which own the address
+      this->allocator->map_virtual_address(this->u_p_block.get(), (void *)offset_addr, offset_size);
+
+      std::cout << "[AllocMemory]  map tensor::offset_index#" << offset_index << " with offset " << i * offset_size << " at " << reinterpret_cast<uint64_t>((void *)offset_addr) << " in block#" << this->u_p_block->block_id << std::endl;
     } else {
+      // this tensor partition does not own the memory block
       std::shared_ptr<PhyBlock> phy_block;
       if (pre_flag) {
         assert(shared_phy_index < shared_phy_blocks_pre.size());
@@ -158,14 +141,12 @@ void VmmTensor::AllocMemory(int offset_index, int world_size, int pre_flag) {
         assert(shared_phy_index < shared_phy_blocks_post.size());
         phy_block = shared_phy_blocks_post[shared_phy_index];
       }
-      DRV_CALL(cuMemMap(reinterpret_cast<CUdeviceptr>(offset_addr), offset_size,
-                        0ULL, phy_block->alloc_handle, 0ULL));
-      CUmemAccessDesc accessDesc = {};
-      accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-      accessDesc.location.id = this->device_id;
-      accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-      DRV_CALL(cuMemSetAccess(reinterpret_cast<CUdeviceptr>(offset_addr),
-                              offset_size, &accessDesc, 1));
+
+      this->allocator->shared_pool.add(phy_block.get());
+      this->allocator->map_virtual_address(phy_block.get(), (void *)offset_addr, offset_size);
+
+      std::cout << "[AllocMemory]  map shared tensor::offset_index#" << i << " with offset " << i * offset_size << " at " << reinterpret_cast<uint64_t>(offset_addr) << " in block#" << phy_block->block_id << std::endl;
+
       shared_phy_index++;
     }
   }
@@ -178,24 +159,30 @@ torch::Tensor VmmTensor::SplitTensor(std::vector<int64_t> shape,
     throw std::runtime_error("SplitTensor already called");
   }
   offset_size = padded_size / world_size;
-  DRV_CALL(cuMemAddressReserve(&offset_v_ptr, offset_size, 0ULL, 0ULL, 0ULL));
-  DRV_CALL(cuMemMap(offset_v_ptr, offset_size, 0ULL,
-                    this->u_p_block->alloc_handle, 0ULL));
-  CUmemAccessDesc accessDesc = {};
-  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  accessDesc.location.id = this->device_id;
-  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-  DRV_CALL(cuMemSetAccess(offset_v_ptr, offset_size, &accessDesc, 1));
+
+
+
+  size_t reserved_size = 0;
+  this->allocator->reserve_virtual_addr((void **)&offset_v_ptr, offset_size, &reserved_size, device_id, 0/*stream*/);
+
+  std::cout << "[VmmTensor::SplitTensor] Reserving virtual address " << reinterpret_cast<uint64_t>((void *)offset_v_ptr) << " with requested size " << offset_size << ", reserved_size " << reserved_size << std::endl;
+
+  this->allocator->map_virtual_address(this->u_p_block.get(), (void *)offset_v_ptr, offset_size);
+
+  std::cout << "[VmmTensor::SplitTensor] map tensor::offset_index#" << offset_index << " with offset " << offset_size << " at " << reinterpret_cast<uint64_t>((void *)offset_v_ptr) << " in block#" << this->u_p_block->block_id << std::endl;
+
   std::vector<int64_t> stride(shape.size());
   stride[stride.size() - 1] = 1;
   for (int i = stride.size() - 2; i >= 0; i--) {
     stride[i] = shape[i + 1] * stride[i + 1];
   }
+
   torch::TensorOptions options =
       torch::TensorOptions().dtype(dtype).device(torch::kCUDA, device_id);
   offset_tensor = torch::from_blob(
       reinterpret_cast<void *>(offset_v_ptr), shape, stride,
       [](void *offset_v_ptr) {}, options);
+
   return offset_tensor;
 }
 
@@ -220,12 +207,11 @@ torch::Tensor VmmTensor::GetTensor(std::vector<int64_t> &shape,
 
 VmmTensor::~VmmTensor() {
   if (v_ptr) {
-    DRV_CALL(cuMemUnmap(v_ptr, padded_size));
-    DRV_CALL(cuMemAddressFree(v_ptr, padded_size));
+    this->allocator->dealloc((void *)v_ptr, padded_size, device_id, 0/*stream*/);
   }
+
   if (offset_v_ptr != 0) {
-    DRV_CALL(cuMemUnmap(offset_v_ptr, offset_size));
-    DRV_CALL(cuMemAddressFree(offset_v_ptr, offset_size));
+    this->allocator->dealloc((void *)offset_v_ptr, offset_size, device_id, 0/*stream*/);
   }
   auto tmp = std::move(u_p_block);
 }
