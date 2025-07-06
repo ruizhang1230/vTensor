@@ -46,6 +46,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("split_tensor", &VmmTensor::SplitTensor)
       .def("to_torch_tensor", py::overload_cast<>(&VmmTensor::GetTensor));
 
+  m.def("init_shared_phy_blocks", &init_shared_phy_blocks,
+        "init_shared_phy_blocks");
+  m.def("init_unique_phy_blocks", &init_unique_phy_blocks,
+        "init_unique_phy_blocks");
+  m.def("release_shared_phy_blocks", &release_shared_phy_blocks,
+        "release_shared_phy_blocks");
+
+  // VMM Allocator API
+
   pybind11::class_<nvgpu::VmmAllocator>(m, "vmm_allocator")
       .def(pybind11::init<>())
       .def("alloc", [](nvgpu::VmmAllocator& self, size_t size, int device, uintptr_t stream){
@@ -58,10 +67,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("vmm_alloc", &vmm_alloc);
   m.def("vmm_dealloc", &vmm_dealloc);
 
-  m.def("init_shared_phy_blocks", &init_shared_phy_blocks,
-        "init_shared_phy_blocks");
-  m.def("init_unique_phy_blocks", &init_unique_phy_blocks,
-        "init_unique_phy_blocks");
-  m.def("release_shared_phy_blocks", &release_shared_phy_blocks,
-        "release_shared_phy_blocks");
+  m.def("vmm_tensor", [](uintptr_t address, std::vector<int64_t> shape, std::vector<int64_t> stride, torch::Dtype dtype, int request_size, int device, uintptr_t stream) {
+      return vmm_realloc_tensor(reinterpret_cast<void *>(address), shape, stride, dtype, request_size, device, reinterpret_cast<CUstream>(stream));
+  });
 }

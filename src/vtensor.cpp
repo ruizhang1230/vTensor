@@ -160,8 +160,6 @@ torch::Tensor VmmTensor::SplitTensor(std::vector<int64_t> shape,
   }
   offset_size = padded_size / world_size;
 
-
-
   size_t reserved_size = 0;
   this->allocator->reserve_virtual_addr((void **)&offset_v_ptr, offset_size, &reserved_size, device_id, 0/*stream*/);
 
@@ -214,4 +212,84 @@ VmmTensor::~VmmTensor() {
     this->allocator->dealloc((void *)offset_v_ptr, offset_size, device_id, 0/*stream*/);
   }
   auto tmp = std::move(u_p_block);
+}
+
+// VMM torch tensor API
+
+torch::Tensor vmm_realloc_tensor(void* address, std::vector<int64_t> shape, std::vector<int64_t> stride, torch::Dtype dtype, size_t request_size, int device, CUstream stream) {
+  nvgpu::VmmAllocator::Ptr _allocator = nvgpu::VmmAllocator::instance();
+
+  PhyBlock* block = _allocator->get_allocated_block(address);
+
+  auto create_torch_tensor = [&](void* v_offset_addr) {
+      torch::TensorOptions options =
+          torch::TensorOptions().dtype(dtype).device(torch::kCUDA, block->device_id);
+
+      torch::Tensor tensor = torch::from_blob(
+          v_offset_addr, shape, stride, [](void *ptr) {}, options);
+
+      return tensor;
+  };
+
+  auto find_available = [&](size_t size) {
+      // find the nearest memory block
+      PhyBlock* block = _allocator->owned_pool.find_available(size);
+
+      if (block == nullptr) {
+          std::shared_ptr<PhyBlock> _block = std::make_shared<PhyBlock>(device, size);
+          bool status = _allocator->owned_pool.add(_block);
+          block = _block.get();
+          assert(status);
+      }
+
+      return block;
+  };
+
+  if (block) {
+    if (block->remaining_size > request_size) {
+      const size_t off = block->block_size - block->remaining_size;
+      void* v_offset_addr = reinterpret_cast<void *>(reinterpret_cast<char *>(address) + off);
+
+      _allocator->map_virtual_address(block, v_offset_addr, request_size);
+
+      return create_torch_tensor(v_offset_addr);
+    } else {
+      CUdeviceptr d_ptr;
+
+      // reserve virtual address
+      size_t reserved_size = 0;
+      _allocator->reserve_virtual_addr((void **)&d_ptr, request_size, &reserved_size, device, stream);
+
+      // Note (yiakwy) : we reuse the remaining memroy in previous the most available block
+      const size_t first_chunk_size = block->remaining_size;
+      const size_t second_chunk_size = request_size - block->remaining_size;
+
+      if (first_chunk_size > 0) {
+        const size_t off = block->block_size - block->remaining_size;
+
+        _allocator->map_virtual_address(block, (void *)d_ptr, first_chunk_size);
+      }
+
+      PhyBlock* another_block = find_available(second_chunk_size);
+
+      void* v_offset_addr = reinterpret_cast<void *>(d_ptr + first_chunk_size);
+      _allocator->map_virtual_address(another_block, v_offset_addr, second_chunk_size);
+
+      return create_torch_tensor((void *)d_ptr);
+    }
+  } else {
+    CUdeviceptr d_ptr;
+
+    // reserve virtual address
+    size_t reserved_size = 0;
+    _allocator->reserve_virtual_addr((void **)&d_ptr, request_size, &reserved_size, device, stream);
+
+    PhyBlock* one_available_block = find_available(request_size);
+
+    const size_t off = one_available_block->block_size - one_available_block->remaining_size;
+    void* v_offset_addr = reinterpret_cast<void *>(d_ptr + off);
+
+    _allocator->map_virtual_address(one_available_block, v_offset_addr, reserved_size);
+    return create_torch_tensor((void *)v_offset_addr);
+  }
 }

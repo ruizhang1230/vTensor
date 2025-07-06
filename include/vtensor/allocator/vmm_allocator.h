@@ -66,15 +66,13 @@ struct VmmAllocator : public DeviceAllocatorBase {
 
     HOST_INLINE CUresult reserve_virtual_addr(void** ptr/*dest*/, size_t request_size, size_t* reserved_size, int device, CUstream stream);
 
-    // VMM mapping virtual addresses API
-
-    HOST_INLINE void map_virtual_address(CUmemAllocationProp prop, CUdeviceptr dptr, size_t size, CUmemGenericAllocationHandle* alloc_handle);
+    // VMM mapping/unmsppinh virtual addresses API
 
     HOST_INLINE void map_virtual_address(PhyBlock* block, void* v_offset_addr, size_t size);
 
-    // VMM unmapping virtual addresses API
-
     HOST_INLINE void unmap_virtual_address(int device, size_t size, CUdeviceptr dptr);
+
+    // helpers
 
     HOST_INLINE PhyBlock* get_allocated_block(void* ptr, bool remove = false);
 };

@@ -26,9 +26,9 @@ include_dirs = [
 
 srcs = [
     "src/vtensor.cpp",
-    "src/allocator.cpp",
-    "src/vmm_allocator.cpp",
-    "src/expandable_phyblock.cpp",
+    "src/allocator/allocator.cpp",
+    "src/allocator/expandable_phyblock.cpp",
+    "src/allocator/vmm_allocator.cpp",
     "src/vtensor_api.cc",
 ]
 

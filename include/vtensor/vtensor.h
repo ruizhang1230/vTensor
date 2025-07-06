@@ -26,6 +26,8 @@ limitations under the License.
 using PhyBlock = nvgpu::ExpandablePhyBlock;
 using Allocator = nvgpu::VmmAllocator;
 
+torch::Tensor vmm_realloc_tensor(void * address, std::vector<int64_t> shape, std::vector<int64_t> stride, torch::Dtype dtype, size_t request_size, int device, CUstream stream);
+
 void init_shared_phy_blocks(int num_blocks, size_t block_size);
 void init_unique_phy_blocks(int num_blocks, size_t block_size);
 void release_shared_phy_blocks();

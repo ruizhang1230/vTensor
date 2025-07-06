@@ -37,16 +37,19 @@ namespace nvgpu {
         // find the nearest memory block
         PhyBlock* block = owned_pool.find_available(size);
 
+        std::shared_ptr<PhyBlock> _block = nullptr;
         if (block == nullptr) {
-            std::shared_ptr<PhyBlock> _block = std::make_shared<PhyBlock>(device, reserved_size);
-            bool status = owned_pool.add(_block);
+            _block = std::make_shared<PhyBlock>(device, reserved_size);
             block = _block.get();
-            assert(status);
         }
 
         // mapping virtual addr to the device memory
         map_virtual_address(block, (void *)dptr, reserved_size);
 
+        if (_block != nullptr) {
+            bool status = owned_pool.add(_block);
+            assert(status);
+        }
         return (void *)dptr;
     }
 
@@ -85,33 +88,17 @@ namespace nvgpu {
         }
     }
 
-    HOST_INLINE void VmmAllocator::map_virtual_address(CUmemAllocationProp prop/*device, location*/, CUdeviceptr dptr, size_t size, CUmemGenericAllocationHandle* alloc_handle) {
-        DRV_CALL(cuMemMap(dptr, size, 0ULL, *alloc_handle, 0ULL));
-
-        CUmemAccessDesc accessDesc = {};
-        accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-        accessDesc.location.id = prop.location.id;
-        accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-        DRV_CALL(cuMemSetAccess(dptr, size, &accessDesc, 1));
-    }
-
     HOST_INLINE void VmmAllocator::map_virtual_address(VmmAllocator::PhyBlock* block, void* v_offset_addr, size_t size) {
         assert(block != nullptr);
 
-        CUmemAllocationProp prop = {};
-        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-        prop.location.id = block->device_id;
-
-        map_virtual_address(prop, reinterpret_cast<CUdeviceptr>(v_offset_addr), size, &(block->alloc_handle));
+        block->map_virtual_address(reinterpret_cast<CUdeviceptr>(v_offset_addr), size);
 
         auto inserted = allocated_blocks.insert({reinterpret_cast<uintptr_t>(v_offset_addr), block});
 
         if (inserted.second) {
-            std::cout << "[map_virtual_address] add mapping of <block#" << block->block_id << ", " << (uintptr_t)v_offset_addr << ", " << size << ">" << std::endl;
+            std::cout << "[VmmAllocator::map_virtual_address] add mapping of <block#" << block->block_id << ", " << (uintptr_t)v_offset_addr << ", " << size << ">" << std::endl;
         } else {
-            std::cout << "[map_virtual_address] failed to add mapping of <block#" << block->block_id << ", " << (uintptr_t)v_offset_addr << ", " << size << ">" << std::endl;
+            std::cout << "[VmmAllocator::map_virtual_address] failed to add mapping of <block#" << block->block_id << ", " << (uintptr_t)v_offset_addr << ", " << size << ">" << std::endl;
         }
 
     }
@@ -128,11 +115,11 @@ namespace nvgpu {
         std::lock_guard<std::mutex> lock(mtx);
         auto it = allocated_blocks.find(reinterpret_cast<uintptr_t>(ptr));
         if (it == allocated_blocks.end()) {
-            std::cout << "[get_allocated_block] cannot find a block associated  to virtual address " << (uintptr_t)ptr << " " << std::endl;
+            std::cout << "[VmmAllocator::get_allocated_block] cannot find a block associated  to virtual address " << (uintptr_t)ptr << " " << std::endl;
             return nullptr;
         }
         PhyBlock* block = it->second;
-        std::cout << "[get_allocated_block] find block#" << block->block_id <<  " associated to virtual address " << (uintptr_t)ptr << " " << std::endl;
+        std::cout << "[VmmAllocator::get_allocated_block] find block#" << block->block_id <<  " associated to virtual address " << (uintptr_t)ptr << " " << std::endl;
         if (remove) {
             allocated_blocks.erase(it);
             if (block->owned_pool != nullptr) {
@@ -141,7 +128,7 @@ namespace nvgpu {
                 owned_pool.remove(block);
             }
 
-            std::cout << "[get_allocated_block] remove mapping of <block#" << block->block_id << ", " << (uintptr_t)ptr << ">" << std::endl;
+            std::cout << "[VmmAllocator::get_allocated_block] remove mapping of <block#" << block->block_id << ", " << (uintptr_t)ptr << ">" << std::endl;
         }
         return block;
     }

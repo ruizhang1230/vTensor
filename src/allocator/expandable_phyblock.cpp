@@ -48,22 +48,23 @@ namespace nvgpu {
     }
 
     ExpandablePhyBlock::~ExpandablePhyBlock() {
-        std::cout << "[Block#" << block_id << "]" << " deallocating device memory ..." << std::endl;
+        std::cout << "[ExpandablePhyBlock::~ExpandablePhyBlock] [Block#" << block_id << "]" << " deallocating device memory ..." << std::endl;
         if (status == CUDA_SUCCESS) {
             status = cuMemRelease(alloc_handle);
             if (status != CUDA_SUCCESS) {
-                std::cout << "[Block#" << block_id << "]" << " failed to deallocate device memory ..." << std::endl;
+                std::cout << "[ExpandablePhyBlock::~ExpandablePhyBlock] [Block#" << block_id << "]" << " failed to deallocate device memory ..." << std::endl;
             } else {
-                std::cout << "[Block#" << block_id << "]" << " device memory deallocated." << std::endl;
+                std::cout << "[ExpandablePhyBlock::~ExpandablePhyBlock] [Block#" << block_id << "]" << " device memory deallocated." << std::endl;
             }
             // DRV_CALL(status);
         }
     }
 
     bool ExpandablePhyBlock::map_virtual_address(CUdeviceptr v_offset_addr, size_t size) {
-        if (remaining_size > size) {
+        if (remaining_size >= size) {
             auto addr_inserted = mapped_addresses.insert({reinterpret_cast<uintptr_t>((void *)v_offset_addr), size});
             if (!addr_inserted.second) {
+                std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] failed to map addresss, remaining size " << remaining_size << "." << std::endl;
                 return false;
             }
 
@@ -78,8 +79,10 @@ namespace nvgpu {
 
             remaining_size -= size;
 
+            std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] mapping address successufully, remaining size " << remaining_size << "." << std::endl;
             return true;
         }
+        std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] failed to map addresss, remaining size " << remaining_size << "." << std::endl;
         return false;
     }
 
@@ -112,9 +115,9 @@ namespace nvgpu {
         auto inserted = blocks.insert(block);
 
         if (inserted.second) {
-            std::cout << "[BlockPool] add Block#" << block->block_id << "." << std::endl;
+            std::cout << "[BlockPool::add] add Block#" << block->block_id << "." << std::endl;
         } else {
-            std::cout << "[BlockPool] failed to add Block#" << block->block_id << "." << std::endl;
+            std::cout << "[BlockPool::add] failed to add Block#" << block->block_id << "." << std::endl;
         }
 
         return inserted.second;
@@ -126,9 +129,9 @@ namespace nvgpu {
         block->owned_pool = nullptr;
 
         if (removed > 0) {
-            std::cout << "[BlockPool] remove Block#" << block->block_id << std::endl;
+            std::cout << "[BlockPool::remove] remove Block#" << block->block_id << std::endl;
         } else {
-            std::cout << "[BlockPool] failed to remove Block#" << block->block_id << std::endl;
+            std::cout << "[BlockPool::remove] failed to remove Block#" << block->block_id << std::endl;
             if (block->block_id == 2) {
 
             }
@@ -138,7 +141,7 @@ namespace nvgpu {
 
     bool OwnedBlockPool<ExpandablePhyBlock>::add(std::shared_ptr<ExpandablePhyBlock> block) {
         if (block->allocator != nullptr && block->allocator != this->allocator) {
-            std::cout << "[BlockPool::add] Failed to add the block#" << block->block_id << " to blockPool" << std::endl;
+            std::cout << "[OwnedBlockPool::add] Failed to add the block#" << block->block_id << " to blockPool" << std::endl;
             exit(0);
         } else {
             block->allocator = this->allocator;
@@ -146,13 +149,16 @@ namespace nvgpu {
 
         auto inserted = blocks.insert({block->block_id, block});
         if (!inserted.second) {
-            std::cout << "[BlockPool] failed to add Block#" << block->block_id << "." << std::endl;
+            std::cout << "[OwnedBlockPool::add] failed to add Block#" << block->block_id << "." << std::endl;
         } else {
-            auto open_blocks_inserted = open_blocks.insert({block->remaining_size,{block.get()}});
-            if (!open_blocks_inserted.second) {
-              open_blocks_inserted.first->second.push_back(block.get());
+            if (block->remaining_size > 0) {
+                auto open_blocks_inserted = open_blocks.insert({block->remaining_size,{block.get()}});
+                if (!open_blocks_inserted.second) {
+                    open_blocks_inserted.first->second.push_back(block.get());
+                    std::cout << "[OwnedBlockPool::add] Block#" << block->block_id << " is now available for allocating maximum " << block->remaining_size << " bytes memory." << std::endl;
+                }
             }
-            std::cout << "[BlockPool] add Block#" << block->block_id << "." << std::endl;
+            std::cout << "[OwnedBlockPool::add] add Block#" << block->block_id << "." << std::endl;
         }
 
         return inserted.second;
@@ -166,14 +172,18 @@ namespace nvgpu {
             auto pos = open_blocks.find(block->remaining_size);
             if (pos != open_blocks.end()) {
                 auto & vec = pos->second;
-                vec.erase( std::find(vec.begin(), vec.end(), block) );
+                if (vec.size() == 1) {
+                    vec.clear();
+                } else {
+                    vec.erase( std::find(vec.begin(), vec.end(), block) );
+                }
             }
 
             blocks.erase(it);
-            std::cout << "[BlockPool] remove Block#" << block->block_id << std::endl;
+            std::cout << "[OwnedBlockPool::remove] remove Block#" << block->block_id << std::endl;
             return true;
         } else {
-            std::cout << "[BlockPool] failed to remove Block#" << block->block_id << std::endl;
+            std::cout << "[OwnedBlockPool::remove] failed to remove Block#" << block->block_id << std::endl;
             return false;
         }
     }
@@ -185,9 +195,12 @@ namespace nvgpu {
                 ExpandablePhyBlock* block = it->second.back();
                 it->second.pop_back();
 
-                auto open_blocks_inserted = open_blocks.insert({block->remaining_size - size, {block}});
-                if (!open_blocks_inserted.second) {
-                    open_blocks_inserted.first->second.push_back(block);
+                if (block->remaining_size - size > 0) {
+                    auto open_blocks_inserted = open_blocks.insert({block->remaining_size - size, {block}});
+                    if (!open_blocks_inserted.second) {
+                        open_blocks_inserted.first->second.push_back(block);
+                        std::cout << "[OwnedBlockPool::add] Block#" << block->block_id << " will be available again for allocating maximum " << block->remaining_size - size << " bytes memory." << std::endl;
+                    }
                 }
 
                 return block;
