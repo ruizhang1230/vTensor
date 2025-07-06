@@ -78,14 +78,20 @@ namespace nvgpu {
     }
 
     HOST_INLINE void VmmAllocator::dealloc(void* ptr/*virtual_memroy_address*/, size_t size, int device, CUstream stream) {
+        ensure_context(device);
+
         PhyBlock* block = get_allocated_block(ptr);
 
-        assert(block != nullptr);
+        if (block != nullptr) {
+            unmap_virtual_address(block, ptr, size);
+        }
 
+        /*
         CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(ptr);
         if (block->unmap_virtual_address(dptr, size) ) {
             unmap_virtual_address(block->device_id, size, dptr);
         }
+         */
     }
 
     HOST_INLINE void VmmAllocator::map_virtual_address(VmmAllocator::PhyBlock* block, void* v_offset_addr, size_t size) {
@@ -103,12 +109,30 @@ namespace nvgpu {
 
     }
 
+    HOST_INLINE void VmmAllocator::unmap_virtual_address(PhyBlock* block, void *v_offset_addr, size_t size) {
+        ensure_context(block->device_id);
+        /*
+        CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(ptr);
+        if (block->unmap_virtual_address(dptr, size) ) {
+            unmap_virtual_address(block->device_id, size, dptr);
+        }
+         */
+        CUdeviceptr dptr = reinterpret_cast<CUdeviceptr>(v_offset_addr);
+
+        size_t old_capacity = block->remaining_size;
+        if (block->unmap_virtual_address(dptr, size) ) {
+            owned_pool.update(block, old_capacity);
+        }
+    }
+
+    /*
     HOST_INLINE void VmmAllocator::unmap_virtual_address(int device, size_t size, CUdeviceptr dptr) {
         ensure_context(device);
 
         DRV_CALL(cuMemUnmap(dptr, size));
         DRV_CALL(cuMemAddressFree(dptr, size));
     }
+    */
 
     HOST_INLINE VmmAllocator::PhyBlock* VmmAllocator::get_allocated_block(void* ptr, bool remove) {
         // TODO (yiakwy) : add mutex shards to enable fine control of concurrent accesses

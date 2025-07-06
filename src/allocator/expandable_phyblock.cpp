@@ -64,7 +64,7 @@ namespace nvgpu {
         if (remaining_size >= size) {
             auto addr_inserted = mapped_addresses.insert({reinterpret_cast<uintptr_t>((void *)v_offset_addr), size});
             if (!addr_inserted.second) {
-                std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] failed to map addresss, remaining size " << remaining_size << "." << std::endl;
+                std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] failed to map addresss " << v_offset_addr <<  ", remaining size " << remaining_size << "." << std::endl;
                 return false;
             }
 
@@ -79,21 +79,26 @@ namespace nvgpu {
 
             remaining_size -= size;
 
-            std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] mapping address successufully, remaining size " << remaining_size << "." << std::endl;
+            std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] mapping address " << v_offset_addr <<  " successufully, remaining size " << remaining_size << "." << std::endl;
             return true;
         }
-        std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] failed to map addresss, remaining size " << remaining_size << "." << std::endl;
+        std::cout << "[ExpandablePhyBlock::map_virtual_address] [Block#" << block_id << "] failed to map addresss " << v_offset_addr <<  ", remaining size " << remaining_size << "." << std::endl;
         return false;
     }
 
     bool ExpandablePhyBlock::unmap_virtual_address(CUdeviceptr v_offset_addr, size_t size) {
         auto it = mapped_addresses.find(reinterpret_cast<uintptr_t>((void*)v_offset_addr));
         if (it != mapped_addresses.end()) {
-            assert(it->second == size);
+
+            // assert(it->second == size);
+            size_t mapped_size = it->second;
+
+            DRV_CALL(cuMemUnmap(v_offset_addr, (ssize_t)mapped_size));
+            DRV_CALL(cuMemAddressFree(v_offset_addr, mapped_size));
 
             mapped_addresses.erase(it);
 
-            remaining_size += size;
+            remaining_size += mapped_size;
             return true;
         }
         return false;
@@ -189,7 +194,7 @@ namespace nvgpu {
     }
 
     ExpandablePhyBlock* OwnedBlockPool<ExpandablePhyBlock>::find_available(size_t size) {
-        auto it = open_blocks.upper_bound(size);
+        auto it = open_blocks.lower_bound(size);
         if (it != open_blocks.end()) {
             if (it->second.size() > 0) {
                 ExpandablePhyBlock* block = it->second.back();
@@ -207,6 +212,33 @@ namespace nvgpu {
             }
         }
         return nullptr;
+    }
+
+    void OwnedBlockPool<ExpandablePhyBlock>::update(ExpandablePhyBlock* block, size_t previous_remaining_size) {
+        auto update = [&]() {
+            if (block->remaining_size > 0) {
+                auto open_blocks_inserted = open_blocks.insert({block->remaining_size, {block}});
+                if (!open_blocks_inserted.second) {
+                    open_blocks_inserted.first->second.push_back(block);
+                    std::cout << "[OwnedBlockPool::add] Block#" << block->block_id << " is now available for allocating maximum " << block->remaining_size << " bytes memory." << std::endl;
+                }
+            }
+        };
+
+        if (block->remaining_size == previous_remaining_size) {
+            return;
+        }
+
+        auto pos = open_blocks.find(previous_remaining_size);
+        if (pos != open_blocks.end()) {
+            auto & vec = pos->second;
+            auto it = std::find(vec.begin(), vec.end(), block);
+            if (it != vec.end() && (*it)->block_id == block->block_id) {
+                vec.erase(it);
+            }
+        }
+
+        update();
     }
 
 } // namespace nvgpu

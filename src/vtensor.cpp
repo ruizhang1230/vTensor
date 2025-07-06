@@ -231,15 +231,14 @@ torch::Tensor vmm_realloc_tensor(void* address, std::vector<int64_t> shape, std:
       return tensor;
   };
 
+  std::shared_ptr<PhyBlock> _block = nullptr;
   auto find_available = [&](size_t size) {
       // find the nearest memory block
       PhyBlock* block = _allocator->owned_pool.find_available(size);
 
       if (block == nullptr) {
-          std::shared_ptr<PhyBlock> _block = std::make_shared<PhyBlock>(device, size);
-          bool status = _allocator->owned_pool.add(_block);
+          _block = std::make_shared<PhyBlock>(device, size);
           block = _block.get();
-          assert(status);
       }
 
       return block;
@@ -247,7 +246,7 @@ torch::Tensor vmm_realloc_tensor(void* address, std::vector<int64_t> shape, std:
 
   if (block) {
     if (block->remaining_size > request_size) {
-      const size_t off = block->block_size - block->remaining_size;
+      size_t off = block->block_size - block->remaining_size;
       void* v_offset_addr = reinterpret_cast<void *>(reinterpret_cast<char *>(address) + off);
 
       _allocator->map_virtual_address(block, v_offset_addr, request_size);
@@ -270,10 +269,15 @@ torch::Tensor vmm_realloc_tensor(void* address, std::vector<int64_t> shape, std:
         _allocator->map_virtual_address(block, (void *)d_ptr, first_chunk_size);
       }
 
-      PhyBlock* another_block = find_available(second_chunk_size);
+      PhyBlock* one_available_block = find_available(second_chunk_size);
 
       void* v_offset_addr = reinterpret_cast<void *>(d_ptr + first_chunk_size);
-      _allocator->map_virtual_address(another_block, v_offset_addr, second_chunk_size);
+      _allocator->map_virtual_address(one_available_block, v_offset_addr, second_chunk_size);
+
+      if (_block != nullptr) {
+        bool status = _allocator->owned_pool.add(_block);
+        assert(status);
+      }
 
       return create_torch_tensor((void *)d_ptr);
     }
@@ -290,6 +294,12 @@ torch::Tensor vmm_realloc_tensor(void* address, std::vector<int64_t> shape, std:
     void* v_offset_addr = reinterpret_cast<void *>(d_ptr + off);
 
     _allocator->map_virtual_address(one_available_block, v_offset_addr, reserved_size);
+
+    if (_block != nullptr) {
+      bool status = _allocator->owned_pool.add(_block);
+      assert(status);
+    }
+
     return create_torch_tensor((void *)v_offset_addr);
   }
 }

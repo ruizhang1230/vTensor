@@ -26,7 +26,7 @@ def test_vmm_allocator_basic():
     print(f"free_bytes : {free_bytes}")
 
 
-def test_vmm_allocator_mapping():
+def test_vmm_allocator_manually_remapping():
     vmm_allocator_torch_api = get_pluggable_allocator()
     torch.cuda.change_current_allocator(vmm_allocator_torch_api)
 
@@ -36,20 +36,15 @@ def test_vmm_allocator_mapping():
     x.zero_()
 
     # we want to resuse the memroy allocated for x
-    new_tensor_shape = shape
-    new_tensor_stride = x.stride()
-
     new_tensor_dtype = torch.float16
-
-    numel = new_tensor_dtype.itemsize * new_tensor_shape[0] * new_tensor_shape[1]
 
     stream = 0  # torch.cuda.current_stream()
     y = vTensor.vmm_tensor(
         x.data_ptr(),
-        new_tensor_shape,
-        new_tensor_stride,
+        x.shape,
+        x.stride(),
         new_tensor_dtype,
-        numel,
+        x.numel(),
         x.get_device(),
         stream,
     )
@@ -77,8 +72,38 @@ def test_vmm_allocator_mapping():
     pass
 
 
-def test_vmm_allocator_unmapping():
-    pass
+def test_vmm_allocator_auto_remapping():
+    vmm_allocator_torch_api = get_pluggable_allocator()
+    torch.cuda.change_current_allocator(vmm_allocator_torch_api)
+
+    #  now all the tensors are allocated via VMM api by default
+    shape = (8 * 1024, 1024)
+    x = torch.empty(shape, dtype=torch.float16, device="cuda")
+    x.zero_()
+
+    x += 1
+
+    y = torch.empty(shape, dtype=torch.float16, device="cuda")
+    y.zero_()
+
+    y += 1
+
+    stream = 0  # torch.cuda.current_stream()
+
+    gpu_v_addr = x.data_ptr()
+
+    print("gpu_v_addr : ", gpu_v_addr)
+
+    vTensor.vmm_dealloc(gpu_v_addr, x.numel(), x.get_device(), stream)
+    del x
+
+    z = torch.empty(shape, dtype=torch.float16, device="cuda")
+
+    assert torch.allclose(
+        y, z, atol=0, rtol=0
+    ), f"z and y should have the same values, even though z is not initialized in pytorch side."
+
+    print(f"✅ Reuse the memory of pre-allocated tensor successuflly")
 
 
 def test_vmm_allocator_resume():
@@ -90,5 +115,5 @@ def test_vmm_allocator_pause():
 
 
 if __name__ == "__main__":
-    test_vmm_allocator_mapping()
+    test_vmm_allocator_auto_remapping()
     pass

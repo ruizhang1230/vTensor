@@ -108,6 +108,8 @@ struct OwnedBlockPool<ExpandablePhyBlock> {
     bool remove(ExpandablePhyBlock* block);
 
     ExpandablePhyBlock* find_available(size_t size);
+
+    void update(ExpandablePhyBlock* block, size_t previous_remaining_size);
 };
 
 } // namespace nvgpu
