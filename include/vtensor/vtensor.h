@@ -21,29 +21,23 @@ limitations under the License.
 // #include <torch/torch.h>
 #include <vector>
 
-class VmmTensor;
+#include "allocator/vmm_allocator.h"
 
-class PhyBlock;
+using PhyBlock = nvgpu::ExpandablePhyBlock;
+using Allocator = nvgpu::VmmAllocator;
+
+torch::Tensor vmm_realloc_tensor(void * address, std::vector<int64_t> shape, std::vector<int64_t> stride, torch::Dtype dtype, size_t request_size, int device, CUstream stream);
 
 void init_shared_phy_blocks(int num_blocks, size_t block_size);
 void init_unique_phy_blocks(int num_blocks, size_t block_size);
 void release_shared_phy_blocks();
 
-class PhyBlock {
-public:
-  PhyBlock(int device_id, size_t block_size);
-  ~PhyBlock();
-
-  size_t block_size;
-  int device_id;
-  CUmemGenericAllocationHandle alloc_handle;
-  CUresult status;
-};
-
 class VmmTensor {
 public:
   VmmTensor(std::vector<int64_t> shape, torch::Dtype dtype, int offset_index,
             int world_size, int pre_flag);
+  VmmTensor(std::vector<int64_t> shape, torch::Dtype dtype, int offset_index,
+            int world_size, Allocator* _allocator);
   ~VmmTensor();
 
   void AllocMemory(int offset_index, int world_size, int pre_flag);
@@ -60,32 +54,23 @@ private:
   int world_size;
 
   std::mutex mtx;
+
   torch::Tensor tensor;
   torch::Tensor offset_tensor;
 
   std::unique_ptr<PhyBlock> u_p_block;
+
+  // can be shared cross different places (torch, this lib for example)
+  static std::shared_ptr<Allocator> allocator;
+
+  // NOTE : should this be owned by vTensor ?
   CUdeviceptr v_ptr;
+
   CUdeviceptr offset_v_ptr = 0;
+
   size_t offset_size = 0;
 };
 
 static std::vector<std::shared_ptr<PhyBlock>> shared_phy_blocks_pre;
 static std::vector<std::shared_ptr<PhyBlock>> shared_phy_blocks_post;
 static std::vector<std::unique_ptr<PhyBlock>> unique_phy_blocks;
-
-// PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-//   m.doc() = "vTensor";
-
-//   pybind11::class_<VmmTensor>(m, "tensor")
-//       .def(pybind11::init<std::vector<int64_t>, torch::Dtype, int, int, int>())
-//       .def("realloc_memory", &VmmTensor::AllocMemory)
-//       .def("split_tensor", &VmmTensor::SplitTensor)
-//       .def("to_torch_tensor", py::overload_cast<>(&VmmTensor::GetTensor));
-
-//   m.def("init_shared_phy_blocks", &init_shared_phy_blocks,
-//         "init_shared_phy_blocks");
-//   m.def("init_unique_phy_blocks", &init_unique_phy_blocks,
-//         "init_unique_phy_blocks");
-//   m.def("release_shared_phy_blocks", &release_shared_phy_blocks,
-//         "release_shared_phy_blocks");
-// }

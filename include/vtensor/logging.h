@@ -17,10 +17,12 @@ limitations under the License.
 
 // TOOD (yiakwy) : replace to fmtlib
 #include <iostream>
+#include <cassert>
 
 #define LOGE(format, ...)                                                      \
   fprintf(stdout, "L%d:" format "\n", __LINE__, ##__VA_ARGS__);                \
   fflush(stdout);
+
 #define ASSERT(cond, ...)                                                      \
   {                                                                            \
     if (!(cond)) {                                                             \
